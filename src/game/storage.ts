@@ -1,19 +1,46 @@
-import { GameSettings, HudLayout, PlayerProfile } from '@/src/types/game';
+import { FriendRecord, GameSettings, HudLayout, PlayerProfile } from '@/src/types/game';
 
-const PROFILE_KEY = 'strike2_profile_v1';
+const PROFILE_KEY = 'strike2_profile_v2';
 const SETTINGS_KEY = 'strike2_settings_v1';
 const HUD_LAYOUT_KEY = 'strike2_hud_layout_v1';
+const FRIENDS_KEY = 'strike2_friends_v1';
 
-export const DEFAULT_PROFILE: PlayerProfile = {
-  credits: 1200,
-  unlockedSkins: ['default', 'asiimov'],
-  unlockedHitFx: ['none'],
-  unlockedKillFx: ['none'],
-  equippedSkin: 'asiimov',
-  equippedHitFx: 'none',
-  equippedKillFx: 'none',
-  casesOpened: 0,
-};
+export function generateUniqueShortId(): string {
+  const num = 100000 + Math.floor(Math.random() * 900000);
+  return `STK-${num}`;
+}
+
+export function generateGuestUid(): string {
+  const rand = Math.random().toString(36).slice(2, 10);
+  return `guest-${Date.now().toString(36)}-${rand}`;
+}
+
+export function createDefaultProfile(): PlayerProfile {
+  const shortId = generateUniqueShortId();
+  const suffix = shortId.slice(-4);
+  return {
+    uid: generateGuestUid(),
+    shortId,
+    displayName: `Operador${suffix}`,
+    bannerId: 'mirage-gold',
+    authProvider: 'guest',
+    credits: 1200,
+    unlockedSkins: ['default', 'asiimov'],
+    unlockedHitFx: ['none'],
+    unlockedKillFx: ['none'],
+    equippedSkin: 'asiimov',
+    equippedHitFx: 'none',
+    equippedKillFx: 'none',
+    casesOpened: 0,
+    kills: 0,
+    deaths: 0,
+    wins: 0,
+    matchesPlayed: 0,
+    score: 0,
+  };
+}
+
+export const DEFAULT_PROFILE: PlayerProfile = createDefaultProfile();
 
 export const DEFAULT_SETTINGS: GameSettings = {
   touchSensitivity: 1.0,
@@ -55,7 +82,34 @@ function safeParse<T>(key: string, fallback: T): T {
 }
 
 export function loadProfile(): PlayerProfile {
-  return safeParse(PROFILE_KEY, DEFAULT_PROFILE);
+  try {
+    const raw = localStorage.getItem(PROFILE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<PlayerProfile>;
+      const base = createDefaultProfile();
+      return {
+        ...base,
+        ...parsed,
+        shortId:
+          parsed.shortId && /^STK-[0-9]{6}$/.test(parsed.shortId)
+            ? parsed.shortId
+            : base.shortId,
+        uid: parsed.uid || base.uid,
+      };
+    }
+    // Migrate v1 wallet if present
+    const v1 = localStorage.getItem('strike2_profile_v1');
+    const base = createDefaultProfile();
+    if (v1) {
+      const merged = { ...base, ...JSON.parse(v1) };
+      saveProfile(merged);
+      return merged;
+    }
+    saveProfile(base);
+    return base;
+  } catch {
+    return createDefaultProfile();
+  }
 }
 
 export function saveProfile(profile: PlayerProfile): void {
@@ -63,6 +117,25 @@ export function saveProfile(profile: PlayerProfile): void {
     localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
   } catch {
     // ignore storage quota errors
+  }
+}
+
+export function loadFriends(): FriendRecord[] {
+  try {
+    const raw = localStorage.getItem(FRIENDS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveFriends(friends: FriendRecord[]): void {
+  try {
+    localStorage.setItem(FRIENDS_KEY, JSON.stringify(friends));
+  } catch {
+    // ignore
   }
 }
 

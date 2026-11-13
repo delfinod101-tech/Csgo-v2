@@ -1,0 +1,237 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidShortId(shortId) {
+      return shortId is string && shortId.size() == 10 && shortId.matches('^STK-[0-9]{6}$');
+    }
+
+    function isValidBannerId(bannerId) {
+      return bannerId is string && bannerId in [
+        'mirage-gold',
+        'nuke-reactor',
+        'cyber-cobalt',
+        'crimson-ops',
+        'shadow-elite',
+        'emerald-spec'
+      ];
+    }
+
+    function isValidAuthProvider(provider) {
+      return provider is string && provider in ['guest', 'google', 'apple'];
+    }
+
+    function isValidPlayerDirectoryEntry(data, shortId) {
+      return data.keys().hasAll([
+        'uid',
+        'shortId',
+        'displayName',
+        'bannerId',
+        'authProvider',
+        'kills',
+        'deaths',
+        'wins',
+        'matchesPlayed',
+        'score',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'uid',
+        'shortId',
+        'displayName',
+        'bannerId',
+        'authProvider',
+        'kills',
+        'deaths',
+        'wins',
+        'matchesPlayed',
+        'score',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      isValidId(data.uid) &&
+      data.uid == request.auth.uid &&
+      isValidShortId(data.shortId) &&
+      data.shortId == shortId &&
+      data.displayName is string &&
+      data.displayName.size() >= 2 &&
+      data.displayName.size() <= 16 &&
+      isValidBannerId(data.bannerId) &&
+      isValidAuthProvider(data.authProvider) &&
+      data.kills is int && data.kills >= 0 && data.kills <= 1000000 &&
+      data.deaths is int && data.deaths >= 0 && data.deaths <= 1000000 &&
+      data.wins is int && data.wins >= 0 && data.wins <= 1000000 &&
+      data.matchesPlayed is int && data.matchesPlayed >= 0 && data.matchesPlayed <= 1000000 &&
+      data.score is int && data.score >= 0 && data.score <= 100000000;
+    }
+
+    function isValidPrivateAccount(data, userId) {
+      return data.keys().hasAll([
+        'uid',
+        'shortId',
+        'credits',
+        'equippedSkin',
+        'equippedHitFx',
+        'equippedKillFx',
+        'unlockedSkins',
+        'unlockedHitFx',
+        'unlockedKillFx',
+        'casesOpened',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'uid',
+        'shortId',
+        'credits',
+        'equippedSkin',
+        'equippedHitFx',
+        'equippedKillFx',
+        'unlockedSkins',
+        'unlockedHitFx',
+        'unlockedKillFx',
+        'casesOpened',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      isValidId(data.uid) &&
+      data.uid == userId &&
+      isValidShortId(data.shortId) &&
+      data.credits is int && data.credits >= 0 && data.credits <= 10000000 &&
+      data.equippedSkin is string && data.equippedSkin.size() >= 1 && data.equippedSkin.size() <= 32 &&
+      data.equippedHitFx is string && data.equippedHitFx.size() >= 1 && data.equippedHitFx.size() <= 32 &&
+      data.equippedKillFx is string && data.equippedKillFx.size() >= 1 && data.equippedKillFx.size() <= 32 &&
+      data.unlockedSkins is list && data.unlockedSkins.size() >= 1 && data.unlockedSkins.size() <= 32 &&
+      data.unlockedSkins[0] is string &&
+      data.unlockedHitFx is list && data.unlockedHitFx.size() >= 1 && data.unlockedHitFx.size() <= 32 &&
+      data.unlockedHitFx[0] is string &&
+      data.unlockedKillFx is list && data.unlockedKillFx.size() >= 1 && data.unlockedKillFx.size() <= 32 &&
+      data.unlockedKillFx[0] is string &&
+      data.casesOpened is int && data.casesOpened >= 0 && data.casesOpened <= 1000000;
+    }
+
+    function isValidFriendEntry(data, userId, friendId) {
+      return data.keys().hasAll([
+        'ownerUid',
+        'friendUid',
+        'friendShortId',
+        'friendName',
+        'friendBannerId',
+        'createdAt'
+      ]) &&
+      data.keys().hasOnly([
+        'ownerUid',
+        'friendUid',
+        'friendShortId',
+        'friendName',
+        'friendBannerId',
+        'createdAt'
+      ]) &&
+      isValidId(data.ownerUid) &&
+      data.ownerUid == userId &&
+      isValidId(data.friendUid) &&
+      data.friendUid == friendId &&
+      isValidShortId(data.friendShortId) &&
+      data.friendName is string && data.friendName.size() >= 2 && data.friendName.size() <= 16 &&
+      isValidBannerId(data.friendBannerId);
+    }
+
+    match /playerDirectory/{shortId} {
+      allow get: if isValidShortId(shortId);
+      allow list: if resource.data.score >= 0;
+      allow create: if isSignedIn()
+        && isValidShortId(shortId)
+        && isValidPlayerDirectoryEntry(incoming(), shortId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isSignedIn()
+        && isValidShortId(shortId)
+        && existing().uid == request.auth.uid
+        && isValidPlayerDirectoryEntry(incoming(), shortId)
+        && incoming().uid == existing().uid
+        && incoming().shortId == existing().shortId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'displayName',
+          'bannerId',
+          'authProvider',
+          'kills',
+          'deaths',
+          'wins',
+          'matchesPlayed',
+          'score',
+          'updatedAt'
+        ]);
+      allow delete: if false;
+    }
+
+    match /players/{userId}/private/{docId} {
+      allow get: if isOwner(userId) && isValidId(docId);
+      allow list: if isOwner(userId);
+      allow create: if isOwner(userId)
+        && docId == 'account'
+        && isValidPrivateAccount(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isOwner(userId)
+        && docId == 'account'
+        && isValidPrivateAccount(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().shortId == existing().shortId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'credits',
+          'equippedSkin',
+          'equippedHitFx',
+          'equippedKillFx',
+          'unlockedSkins',
+          'unlockedHitFx',
+          'unlockedKillFx',
+          'casesOpened',
+          'updatedAt'
+        ]);
+      allow delete: if false;
+    }
+
+    match /players/{userId}/friends/{friendId} {
+      allow get: if isOwner(userId) && isValidId(friendId);
+      allow list: if isOwner(userId) && resource.data.ownerUid == request.auth.uid;
+      allow create: if isOwner(userId)
+        && isValidId(friendId)
+        && isValidFriendEntry(incoming(), userId, friendId)
+        && incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isOwner(userId) && isValidId(friendId);
+    }
+
+    match /test/connection {
+      allow get: if true;
+    }
+  }
+}

@@ -11,6 +11,9 @@ import {
   KillFeedEntry,
   MapId,
   MatchHudState,
+  PlayModeKind,
+  RemoteActorState,
+  ScoreboardEntry,
   SkinId,
   TeamSide,
   WEAPON_SPECS,
@@ -18,6 +21,13 @@ import {
 } from '@/src/types/game';
 import { buildCharacterRig, CharacterRig } from '@/src/game/character';
 import { AABBCollider, buildArenaMap } from '@/src/game/maps';
+import {
+  CombatHitEvent,
+  CombatKillEvent,
+  CombatTracerEvent,
+  RoomSnapshotEvent,
+  multiplayerClient,
+} from '@/src/game/multiplayerClient';
 import { soundEngine } from '@/src/game/sound';
 import { createGameTextures } from '@/src/game/textures';
 import { buildWeaponModel, WeaponModelHandle } from '@/src/game/weapons';
@@ -39,6 +49,11 @@ export interface GameViewportHandle {
 }
 
 interface GameViewportProps {
+  playMode: PlayModeKind;
+  roomCode: string | null;
+  selfShortId: string;
+  selfName: string;
+  initialSpawn: { x: number; y: number; z: number; yaw: number } | null;
   team: TeamSide;
   mapId: MapId;
   gameMode: GameModeId;
@@ -50,13 +65,17 @@ interface GameViewportProps {
   paused: boolean;
   onHudUpdate: (hud: MatchHudState) => void;
   onEarnCredits: (amount: number) => void;
+  onRecordCareerStat: (delta: { kills?: number; deaths?: number; wins?: number; matches?: number; score?: number }) => void;
   onToggleBuyMenu: () => void;
+  onToggleScoreboard?: () => void;
 }
 
 interface BotEntity {
   id: string;
   name: string;
   team: TeamSide;
+  kills: number;
+  deaths: number;
   rig: CharacterRig;
   hp: number;
   maxHp: number;
@@ -154,9 +173,28 @@ function resolveCircleAABB(
   return { x: rx, z: rz };
 }
 
+interface RemoteActorRender {
+  id: string;
+  state: RemoteActorState;
+  rig: CharacterRig;
+  currentPos: THREE.Vector3;
+  targetPos: THREE.Vector3;
+  currentYaw: number;
+  targetYaw: number;
+  hitFlash: number;
+  recoilFlash: number;
+  deathTimer: number;
+  lastWeaponKey: string;
+}
+
 export const GameViewport = React.forwardRef<GameViewportHandle, GameViewportProps>(
   (
     {
+      playMode,
+      roomCode,
+      selfShortId,
+      selfName,
+      initialSpawn,
       team,
       mapId,
       gameMode,
@@ -168,7 +206,9 @@ export const GameViewport = React.forwardRef<GameViewportHandle, GameViewportPro
       paused,
       onHudUpdate,
       onEarnCredits,
+      onRecordCareerStat,
       onToggleBuyMenu,
+      onToggleScoreboard,
     },
     ref
   ) => {
@@ -187,8 +227,12 @@ export const GameViewport = React.forwardRef<GameViewportHandle, GameViewportPro
     onHudRef.current = onHudUpdate;
     const onEarnRef = useRef(onEarnCredits);
     onEarnRef.current = onEarnCredits;
+    const onStatRef = useRef(onRecordCareerStat);
+    onStatRef.current = onRecordCareerStat;
     const onBuyMenuRef = useRef(onToggleBuyMenu);
     onBuyMenuRef.current = onToggleBuyMenu;
+    const onScoreboardRef = useRef(onToggleScoreboard);
+    onScoreboardRef.current = onToggleScoreboard;
 
     const apiRef = useRef<GameViewportHandle | null>(null);
     const applyGraphicsRef = useRef<(() => void) | null>(null);
@@ -308,11 +352,16 @@ export const GameViewport = React.forwardRef<GameViewportHandle, GameViewportPro
       const enemyTeam: TeamSide = team === 'ct' ? 't' : 'ct';
       const playerSpawns = team === 'ct' ? arena.ctSpawns : arena.tSpawns;
       const enemySpawns = enemyTeam === 'ct' ? arena.ctSpawns : arena.tSpawns;
+      const isOnlineMode = playMode === 'online';
 
-      const playerPos = new THREE.Vector3().copy(playerSpawns[0]);
+      const playerPos = new THREE.Vector3().copy(
+        initialSpawn
+          ? new THREE.Vector3(initialSpawn.x, initialSpawn.y, initialSpawn.z)
+          : playerSpawns[0]
+      );
       let playerVelY = 0;
       let isGrounded = true;
-      let yaw = team === 'ct' ? Math.PI : 0;
+      let yaw = initialSpawn ? initialSpawn.yaw : team === 'ct' ? Math.PI : 0;
       let pitch = 0;
       let eyeHeight = 1.65;
 
@@ -506,36 +555,176 @@ export const GameViewport = React.forwardRef<GameViewportHandle, GameViewportPro
       equipViewmodel(activeWeapon);
 
       const bots: BotEntity[] = [];
-      for (let i = 0; i < 5; i++) {
-        const spawn = enemySpawns[i % enemySpawns.length];
-        const rig = buildCharacterRig(enemyTeam, {
-          includeHitboxes: true,
-          entityId: `bot-${i}`,
-        });
-        const botWeapon: WeaponId = i === 2 ? 'awp' : i % 2 === 0 ? 'ak47' : 'm4a1s';
-        rig.setWeapon(botWeapon, 'default', textures.skinMaps);
-        rig.root.position.set(spawn.x, 0, spawn.z);
-        scene.add(rig.root);
+      const remoteActors = new Map<string, RemoteActorRender>();
+      let unsubSnapshot: (() => void) | null = null;
+      let unsubHit: (() => void) | null = null;
+      let unsubKill: (() => void) | null = null;
+      let unsubTracer: (() => void) | null = null;
+      let lastNetSend = 0;
 
-        bots.push({
-          id: `bot-${i}`,
-          name: BOT_CALLSIGNS[i],
-          team: enemyTeam,
-          rig,
-          hp: 100,
-          maxHp: 100,
-          pos: spawn.clone(),
-          yaw: enemyTeam === 'ct' ? Math.PI : 0,
-          waypoint: arena.patrolPoints[(i * 2) % arena.patrolPoints.length].clone(),
-          strafeDir: i % 2 === 0 ? 1 : -1,
-          strafeTimer: 1.2 + Math.random(),
-          fireCooldown: 0.5 + Math.random() * 0.6,
-          reactionTimer: 0.45,
-          recoilFlash: 0,
-          hitFlash: 0,
-          isDead: false,
-          deathTimer: 0,
-          respawnTimer: 0,
+      if (!isOnlineMode) {
+        for (let i = 0; i < 5; i++) {
+          const spawn = enemySpawns[i % enemySpawns.length];
+          const rig = buildCharacterRig(enemyTeam, {
+            includeHitboxes: true,
+            entityId: `bot-${i}`,
+          });
+          const botWeapon: WeaponId = i === 2 ? 'awp' : i % 2 === 0 ? 'ak47' : 'm4a1s';
+          rig.setWeapon(botWeapon, 'default', textures.skinMaps);
+          rig.root.position.set(spawn.x, 0, spawn.z);
+          scene.add(rig.root);
+
+          bots.push({
+            id: `bot-${i}`,
+            name: BOT_CALLSIGNS[i],
+            team: enemyTeam,
+            kills: 0,
+            deaths: 0,
+            rig,
+            hp: 100,
+            maxHp: 100,
+            pos: spawn.clone(),
+            yaw: enemyTeam === 'ct' ? Math.PI : 0,
+            waypoint: arena.patrolPoints[(i * 2) % arena.patrolPoints.length].clone(),
+            strafeDir: i % 2 === 0 ? 1 : -1,
+            strafeTimer: 1.2 + Math.random(),
+            fireCooldown: 0.5 + Math.random() * 0.6,
+            reactionTimer: 0.45,
+            recoilFlash: 0,
+            hitFlash: 0,
+            isDead: false,
+            deathTimer: 0,
+            respawnTimer: 0,
+          });
+        }
+      } else {
+        unsubSnapshot = multiplayerClient.on('snapshot', (snap: RoomSnapshotEvent) => {
+          ctScore = snap.ctScore;
+          tScore = snap.tScore;
+          roundNumber = snap.roundNumber;
+          roundTimeSec = snap.roundTimeSec;
+          if (snap.matchEnded && !matchEnded) {
+            matchEnded = true;
+            winnerTeam = snap.winnerTeam;
+            const didWin = snap.winnerTeam === team;
+            onStatRef.current({ matches: 1, wins: didWin ? 1 : 0, score: didWin ? 250 : 0 });
+            if (didWin) {
+              creditsEarnedMatch += 150;
+              onEarnRef.current(150);
+            }
+          } else if (!snap.matchEnded && matchEnded) {
+            matchEnded = false;
+            winnerTeam = null;
+          }
+
+          const seenIds = new Set<string>();
+          for (const actor of snap.actors) {
+            if (actor.id === selfShortId) {
+              kills = actor.kills;
+              deaths = actor.deaths;
+              if (actor.isDead && playerRespawnTimer <= 0) {
+                playerRespawnTimer = 3.0;
+                hp = 0;
+              } else if (!actor.isDead && playerRespawnTimer > 0) {
+                playerRespawnTimer = 0;
+                playerPos.set(actor.x, actor.y, actor.z);
+                hp = 100;
+                armor = 100;
+              }
+              continue;
+            }
+
+            seenIds.add(actor.id);
+            let entry = remoteActors.get(actor.id);
+            const weaponKey = `${actor.weaponId}:${actor.skinId}:${actor.team}`;
+            if (!entry) {
+              const rig = buildCharacterRig(actor.team, {
+                includeHitboxes: true,
+                entityId: actor.id,
+              });
+              rig.setWeapon(actor.weaponId, actor.skinId, textures.skinMaps);
+              rig.root.position.set(actor.x, actor.y, actor.z);
+              scene.add(rig.root);
+              entry = {
+                id: actor.id,
+                state: actor,
+                rig,
+                currentPos: new THREE.Vector3(actor.x, actor.y, actor.z),
+                targetPos: new THREE.Vector3(actor.x, actor.y, actor.z),
+                currentYaw: actor.yaw,
+                targetYaw: actor.yaw,
+                hitFlash: 0,
+                recoilFlash: 0,
+                deathTimer: 0,
+                lastWeaponKey: weaponKey,
+              };
+              remoteActors.set(actor.id, entry);
+            } else {
+              entry.state = actor;
+              entry.targetPos.set(actor.x, actor.y, actor.z);
+              entry.targetYaw = actor.yaw;
+              if (entry.lastWeaponKey !== weaponKey) {
+                entry.lastWeaponKey = weaponKey;
+                entry.rig.setWeapon(actor.weaponId, actor.skinId, textures.skinMaps);
+              }
+            }
+          }
+
+          for (const [id, entry] of remoteActors.entries()) {
+            if (!seenIds.has(id)) {
+              scene.remove(entry.rig.root);
+              entry.rig.dispose();
+              remoteActors.delete(id);
+            }
+          }
+        });
+
+        unsubTracer = multiplayerClient.on('tracer', (ev: CombatTracerEvent) => {
+          if (ev.shooterId === selfShortId) return;
+          spawnTracer(
+            new THREE.Vector3(ev.from.x, ev.from.y, ev.from.z),
+            new THREE.Vector3(ev.to.x, ev.to.y, ev.to.z)
+          );
+          const shooter = remoteActors.get(ev.shooterId);
+          if (shooter) shooter.recoilFlash = 1.0;
+        });
+
+        unsubHit = multiplayerClient.on('hit', (ev: CombatHitEvent) => {
+          if (ev.victimId === selfShortId) {
+            hp = ev.hp;
+            armor = ev.armor;
+          } else {
+            const victim = remoteActors.get(ev.victimId);
+            if (victim) victim.hitFlash = 1.0;
+          }
+        });
+
+        unsubKill = multiplayerClient.on('kill', (ev: CombatKillEvent) => {
+          ctScore = ev.ctScore;
+          tScore = ev.tScore;
+          pushKillFeed(
+            ev.killerId === selfShortId ? 'Você' : ev.killerName,
+            ev.killerTeam,
+            ev.victimId === selfShortId ? 'Você' : ev.victimName,
+            ev.victimTeam,
+            ev.weaponId,
+            ev.headshot
+          );
+
+          if (ev.killerId === selfShortId) {
+            const reward = ev.headshot ? 45 : 25;
+            creditsEarnedMatch += reward;
+            money = Math.min(16000, money + (ev.headshot ? 450 : 300));
+            onEarnRef.current(reward);
+            onStatRef.current({ kills: 1, score: ev.headshot ? 150 : 100 });
+            spawnKillEffect(new THREE.Vector3(ev.pos.x, ev.pos.y, ev.pos.z));
+          }
+          if (ev.victimId === selfShortId) {
+            onStatRef.current({ deaths: 1 });
+            if (gameMode === 'deathmatch') {
+              playerRespawnTimer = 3.0;
+            }
+          }
         });
       }
 
@@ -647,9 +836,17 @@ export const GameViewport = React.forwardRef<GameViewportHandle, GameViewportPro
         _raycaster.far = activeWeapon === 'knife' ? 2.4 : 160;
 
         const targets: THREE.Object3D[] = [...arena.obstacleMeshes];
-        for (const b of bots) {
-          if (!b.isDead) {
-            targets.push(b.rig.headHitbox, b.rig.bodyHitbox);
+        if (!isOnlineMode) {
+          for (const b of bots) {
+            if (!b.isDead) {
+              targets.push(b.rig.headHitbox, b.rig.bodyHitbox);
+            }
+          }
+        } else {
+          for (const ra of remoteActors.values()) {
+            if (!ra.state.isDead && ra.state.team !== team) {
+              targets.push(ra.rig.headHitbox, ra.rig.bodyHitbox);
+            }
           }
         }
 
@@ -659,13 +856,18 @@ export const GameViewport = React.forwardRef<GameViewportHandle, GameViewportPro
             ? hits[0].point
             : camera.position.clone().add(_raycaster.ray.direction.clone().multiplyScalar(60));
 
+        const tracerOrigin = camera.position
+          .clone()
+          .add(new THREE.Vector3(0.18, -0.14, 0).applyAxisAngle(_up, yaw))
+          .add(_raycaster.ray.direction.clone().multiplyScalar(0.7));
+
         if (activeWeapon !== 'knife') {
-          const tracerOrigin = camera.position
-            .clone()
-            .add(new THREE.Vector3(0.18, -0.14, 0).applyAxisAngle(_up, yaw))
-            .add(_raycaster.ray.direction.clone().multiplyScalar(0.7));
           spawnTracer(tracerOrigin, endPoint);
         }
+
+        let onlineTargetId: string | undefined;
+        let onlineHitZone: 'head' | 'body' | undefined;
+        let onlineHitPoint: { x: number; y: number; z: number } | undefined;
 
         if (hits.length > 0) {
           const hitObj = hits[0].object;
@@ -673,56 +875,89 @@ export const GameViewport = React.forwardRef<GameViewportHandle, GameViewportPro
           const hitZone = hitObj.userData.hitZone as 'head' | 'body' | undefined;
 
           if (entityId && hitZone) {
-            const bot = bots.find((b) => b.id === entityId);
-            if (bot && !bot.isDead) {
-              const isHead = hitZone === 'head';
-              const dmg = Math.round(spec.damage * (isHead ? spec.headshotMult : 1));
-              bot.hp -= dmg;
-              bot.hitFlash = 1.0;
+            const isHead = hitZone === 'head';
+            if (isOnlineMode) {
+              const ra = remoteActors.get(entityId);
+              if (ra && !ra.state.isDead && ra.state.team !== team) {
+                onlineTargetId = entityId;
+                onlineHitZone = hitZone;
+                onlineHitPoint = {
+                  x: hits[0].point.x,
+                  y: hits[0].point.y,
+                  z: hits[0].point.z,
+                };
+                ra.hitFlash = 1.0;
+                spawnHitEffect(hits[0].point, isHead);
+                hitmarkerKind = isHead ? 'head' : 'body';
+                hitmarkerTimer = 0.18;
+                if (isHead) soundEngine.playHeadshotDink();
+                else soundEngine.playHitmarker();
+              }
+            } else {
+              const bot = bots.find((b) => b.id === entityId);
+              if (bot && !bot.isDead) {
+                const dmg = Math.round(spec.damage * (isHead ? spec.headshotMult : 1));
+                bot.hp -= dmg;
+                bot.hitFlash = 1.0;
 
-              spawnHitEffect(hits[0].point, isHead);
+                spawnHitEffect(hits[0].point, isHead);
 
-              hitmarkerKind = isHead ? 'head' : 'body';
-              hitmarkerTimer = 0.18;
+                hitmarkerKind = isHead ? 'head' : 'body';
+                hitmarkerTimer = 0.18;
 
-              if (isHead) soundEngine.playHeadshotDink();
-              else soundEngine.playHitmarker();
+                if (isHead) soundEngine.playHeadshotDink();
+                else soundEngine.playHitmarker();
 
-              if (bot.hp <= 0) {
-                bot.hp = 0;
-                bot.isDead = true;
-                bot.deathTimer = 0;
-                bot.respawnTimer = 3.5;
-                kills += 1;
-                money = Math.min(16000, money + (isHead ? 450 : 300));
-                const creditReward = isHead ? 45 : 25;
-                creditsEarnedMatch += creditReward;
-                onEarnRef.current(creditReward);
+                if (bot.hp <= 0) {
+                  bot.hp = 0;
+                  bot.isDead = true;
+                  bot.deaths += 1;
+                  bot.deathTimer = 0;
+                  bot.respawnTimer = 3.5;
+                  kills += 1;
+                  money = Math.min(16000, money + (isHead ? 450 : 300));
+                  const creditReward = isHead ? 45 : 25;
+                  creditsEarnedMatch += creditReward;
+                  onEarnRef.current(creditReward);
+                  onStatRef.current({ kills: 1, score: isHead ? 150 : 100 });
 
-                spawnKillEffect(bot.pos);
+                  spawnKillEffect(bot.pos);
 
-                if (team === 'ct') ctScore += 1;
-                else tScore += 1;
-                pushKillFeed('Você', team, bot.name, bot.team, activeWeapon, isHead);
+                  if (team === 'ct') ctScore += 1;
+                  else tScore += 1;
+                  pushKillFeed('Você', team, bot.name, bot.team, activeWeapon, isHead);
 
-                if (gameMode === 'tactical') {
-                  const aliveBots = bots.filter((x) => !x.isDead).length;
-                  if (aliveBots === 0) {
-                    roundNumber += 1;
-                    if (ctScore >= 10 || tScore >= 10) {
-                      matchEnded = true;
-                      winnerTeam = team;
-                      creditsEarnedMatch += 150;
-                      onEarnRef.current(150);
-                    } else {
-                      roundTimeSec = 90;
-                      resetRoundEntities();
+                  if (gameMode === 'tactical') {
+                    const aliveBots = bots.filter((x) => !x.isDead).length;
+                    if (aliveBots === 0) {
+                      roundNumber += 1;
+                      if (ctScore >= 10 || tScore >= 10) {
+                        matchEnded = true;
+                        winnerTeam = team;
+                        creditsEarnedMatch += 150;
+                        onEarnRef.current(150);
+                        onStatRef.current({ matches: 1, wins: 1, score: 250 });
+                      } else {
+                        roundTimeSec = 90;
+                        resetRoundEntities();
+                      }
                     }
                   }
                 }
               }
             }
           }
+        }
+
+        if (isOnlineMode) {
+          multiplayerClient.sendShot({
+            weaponId: activeWeapon,
+            from: { x: tracerOrigin.x, y: tracerOrigin.y, z: tracerOrigin.z },
+            to: { x: endPoint.x, y: endPoint.y, z: endPoint.z },
+            targetId: onlineTargetId,
+            hitZone: onlineHitZone,
+            hitPoint: onlineHitPoint,
+          });
         }
 
         if (activeWeapon === 'awp' && isScoped) {
@@ -796,6 +1031,10 @@ export const GameViewport = React.forwardRef<GameViewportHandle, GameViewportPro
           }
         },
         restartMatch: () => {
+          if (isOnlineMode) {
+            multiplayerClient.restartRoom();
+            return;
+          }
           ctScore = 0;
           tScore = 0;
           roundNumber = 1;
@@ -813,6 +1052,11 @@ export const GameViewport = React.forwardRef<GameViewportHandle, GameViewportPro
 
       const onKeyDown = (e: KeyboardEvent) => {
         keys[e.code] = true;
+        if (e.code === 'Tab') {
+          e.preventDefault();
+          onScoreboardRef.current?.();
+          return;
+        }
         if (pausedRef.current) return;
         if (e.code === 'KeyR') startReload();
         if (e.code === 'KeyF') apiRef.current?.triggerInspect();
@@ -973,41 +1217,49 @@ export const GameViewport = React.forwardRef<GameViewportHandle, GameViewportPro
         }
 
         if (!pausedRef.current && !matchEnded) {
-          roundTimeSec = Math.max(0, roundTimeSec - dt);
-          if (roundTimeSec <= 0) {
-            if (gameMode === 'deathmatch') {
-              matchEnded = true;
-              winnerTeam = ctScore >= tScore ? 'ct' : 't';
-              if ((winnerTeam === team)) {
-                creditsEarnedMatch += 120;
-                onEarnRef.current(120);
-              }
-            } else {
-              if (team === 'ct') ctScore += 1;
-              else tScore += 1;
-              roundNumber += 1;
-              if (ctScore >= 10 || tScore >= 10) {
+          if (!isOnlineMode) {
+            roundTimeSec = Math.max(0, roundTimeSec - dt);
+            if (roundTimeSec <= 0) {
+              if (gameMode === 'deathmatch') {
                 matchEnded = true;
-                winnerTeam = ctScore > tScore ? 'ct' : 't';
-                if (winnerTeam === team) {
-                  creditsEarnedMatch += 150;
-                  onEarnRef.current(150);
+                winnerTeam = ctScore >= tScore ? 'ct' : 't';
+                const didWin = winnerTeam === team;
+                onStatRef.current({ matches: 1, wins: didWin ? 1 : 0, score: didWin ? 200 : 0 });
+                if (didWin) {
+                  creditsEarnedMatch += 120;
+                  onEarnRef.current(120);
                 }
               } else {
-                roundTimeSec = 90;
-                resetRoundEntities();
+                if (team === 'ct') ctScore += 1;
+                else tScore += 1;
+                roundNumber += 1;
+                if (ctScore >= 10 || tScore >= 10) {
+                  matchEnded = true;
+                  winnerTeam = ctScore > tScore ? 'ct' : 't';
+                  const didWin = winnerTeam === team;
+                  onStatRef.current({ matches: 1, wins: didWin ? 1 : 0, score: didWin ? 250 : 0 });
+                  if (didWin) {
+                    creditsEarnedMatch += 150;
+                    onEarnRef.current(150);
+                  }
+                } else {
+                  roundTimeSec = 90;
+                  resetRoundEntities();
+                }
               }
             }
-          }
 
-          if (playerRespawnTimer > 0) {
-            playerRespawnTimer -= dt;
-            if (playerRespawnTimer <= 0) {
-              const sp = playerSpawns[Math.floor(Math.random() * playerSpawns.length)];
-              playerPos.copy(sp);
-              hp = 100;
-              armor = 100;
+            if (playerRespawnTimer > 0) {
+              playerRespawnTimer -= dt;
+              if (playerRespawnTimer <= 0) {
+                const sp = playerSpawns[Math.floor(Math.random() * playerSpawns.length)];
+                playerPos.copy(sp);
+                hp = 100;
+                armor = 100;
+              }
             }
+          } else if (playerRespawnTimer > 0) {
+            playerRespawnTimer = Math.max(0, playerRespawnTimer - dt);
           }
 
           const spec = WEAPON_SPECS[activeWeapon];
@@ -1129,143 +1381,199 @@ export const GameViewport = React.forwardRef<GameViewportHandle, GameViewportPro
             viewmodelWeapon.muzzleFlash.rotation.z = elapsed * 45;
           }
 
-          // Bots Update
-          _playerEye.set(playerPos.x, playerPos.y + 1.45, playerPos.z);
+          // Send local state at 20Hz when online & interpolate remote actors at 60fps
+          const nowNet = performance.now();
+          if (isOnlineMode && nowNet - lastNetSend >= 50) {
+            lastNetSend = nowNet;
+            multiplayerClient.sendPlayerState({
+              x: playerPos.x,
+              y: playerPos.y,
+              z: playerPos.z,
+              yaw,
+              weaponId: activeWeapon,
+              skinId,
+              crouching: isCrouching,
+            });
+          }
 
-          for (let i = 0; i < bots.length; i++) {
-            const bot = bots[i];
-            if (bot.isDead) {
-              bot.deathTimer = Math.min(1, bot.deathTimer + dt * 2.4);
-              bot.rig.updateCombatPose(elapsed, 0, 0, true, bot.deathTimer, 0);
-              if (gameMode === 'deathmatch') {
-                bot.respawnTimer -= dt;
-                if (bot.respawnTimer <= 0) {
-                  const sp = enemySpawns[Math.floor(Math.random() * enemySpawns.length)];
-                  bot.pos.copy(sp);
-                  bot.rig.root.position.copy(sp);
-                  bot.hp = 100;
-                  bot.isDead = false;
-                  bot.deathTimer = 0;
-                  bot.reactionTimer = 0.55;
-                }
+          if (isOnlineMode) {
+            for (const ra of remoteActors.values()) {
+              ra.hitFlash = Math.max(0, ra.hitFlash - dt * 5);
+              ra.recoilFlash = Math.max(0, ra.recoilFlash - dt * 8);
+
+              if (ra.state.isDead) {
+                ra.deathTimer = Math.min(1, ra.deathTimer + dt * 2.4);
+                ra.rig.updateCombatPose(elapsed, 0, 0, true, ra.deathTimer, 0);
+                continue;
               }
-              continue;
+              ra.deathTimer = 0;
+
+              const prevX = ra.currentPos.x;
+              const prevZ = ra.currentPos.z;
+              ra.currentPos.x = THREE.MathUtils.damp(ra.currentPos.x, ra.targetPos.x, 14, dt);
+              ra.currentPos.y = THREE.MathUtils.damp(ra.currentPos.y, ra.targetPos.y, 14, dt);
+              ra.currentPos.z = THREE.MathUtils.damp(ra.currentPos.z, ra.targetPos.z, 14, dt);
+
+              // Shortest-angle yaw damping
+              let yawDiff = ((ra.targetYaw - ra.currentYaw + Math.PI) % (Math.PI * 2)) - Math.PI;
+              if (yawDiff < -Math.PI) yawDiff += Math.PI * 2;
+              ra.currentYaw += yawDiff * Math.min(1, dt * 14);
+
+              const stepDist = Math.hypot(ra.currentPos.x - prevX, ra.currentPos.z - prevZ) / Math.max(dt, 0.001);
+              const moveRatioRemote = Math.min(stepDist / 4.5, 1);
+
+              ra.rig.root.position.copy(ra.currentPos);
+              ra.rig.root.rotation.y = ra.currentYaw;
+              ra.rig.updateCombatPose(
+                elapsed,
+                moveRatioRemote,
+                ra.recoilFlash,
+                false,
+                0,
+                ra.hitFlash
+              );
             }
+          } else {
+            // Offline Bots Update
+            _playerEye.set(playerPos.x, playerPos.y + 1.45, playerPos.z);
 
-            bot.hitFlash = Math.max(0, bot.hitFlash - dt * 5);
-            bot.recoilFlash = Math.max(0, bot.recoilFlash - dt * 8);
-            bot.fireCooldown = Math.max(0, bot.fireCooldown - dt);
-
-            _botEye.set(bot.pos.x, 1.52, bot.pos.z);
-            _toPlayer.subVectors(_playerEye, _botEye);
-            const distToPlayer = _toPlayer.length();
-            let seesPlayer = false;
-
-            if (distToPlayer < 42 && playerRespawnTimer <= 0) {
-              _dir.copy(_toPlayer).divideScalar(distToPlayer);
-              _raycaster.set(_botEye, _dir);
-              _raycaster.far = distToPlayer;
-              const occ = _raycaster.intersectObjects(arena.obstacleMeshes, false);
-              if (occ.length === 0) seesPlayer = true;
-            }
-
-            let moveSpeedRatio = 0;
-            if (seesPlayer) {
-              bot.yaw = Math.atan2(_toPlayer.x, _toPlayer.z);
-              bot.strafeTimer -= dt;
-              if (bot.strafeTimer <= 0) {
-                bot.strafeDir *= -1;
-                bot.strafeTimer = 0.9 + Math.random() * 1.1;
+            for (let i = 0; i < bots.length; i++) {
+              const bot = bots[i];
+              if (bot.isDead) {
+                bot.deathTimer = Math.min(1, bot.deathTimer + dt * 2.4);
+                bot.rig.updateCombatPose(elapsed, 0, 0, true, bot.deathTimer, 0);
+                if (gameMode === 'deathmatch') {
+                  bot.respawnTimer -= dt;
+                  if (bot.respawnTimer <= 0) {
+                    const sp = enemySpawns[Math.floor(Math.random() * enemySpawns.length)];
+                    bot.pos.copy(sp);
+                    bot.rig.root.position.copy(sp);
+                    bot.hp = 100;
+                    bot.isDead = false;
+                    bot.deathTimer = 0;
+                    bot.reactionTimer = 0.55;
+                  }
+                }
+                continue;
               }
 
-              const strafeSpeed = distToPlayer > 12 ? 2.4 : 1.8;
-              const sx = Math.cos(bot.yaw) * bot.strafeDir * strafeSpeed;
-              const sz = -Math.sin(bot.yaw) * bot.strafeDir * strafeSpeed;
-              const bx = resolveCircleAABB(bot.pos.x + sx * dt, bot.pos.z, 0, 0.42, arena.colliders);
-              bot.pos.x = bx.x;
-              const bz = resolveCircleAABB(bot.pos.x, bot.pos.z + sz * dt, 0, 0.42, arena.colliders);
-              bot.pos.z = bz.z;
-              moveSpeedRatio = 0.65;
+              bot.hitFlash = Math.max(0, bot.hitFlash - dt * 5);
+              bot.recoilFlash = Math.max(0, bot.recoilFlash - dt * 8);
+              bot.fireCooldown = Math.max(0, bot.fireCooldown - dt);
 
-              if (bot.reactionTimer > 0) {
-                bot.reactionTimer -= dt;
-              } else if (bot.fireCooldown <= 0) {
-                bot.fireCooldown = 0.24 + Math.random() * 0.22;
-                bot.recoilFlash = 1.0;
+              _botEye.set(bot.pos.x, 1.52, bot.pos.z);
+              _toPlayer.subVectors(_playerEye, _botEye);
+              const distToPlayer = _toPlayer.length();
+              let seesPlayer = false;
 
-                const accuracy = Math.max(0.28, 0.68 - distToPlayer * 0.012);
-                const hitPlayer = Math.random() < accuracy;
-                const aimPoint = _playerEye.clone();
-                if (!hitPlayer) {
-                  aimPoint.x += (Math.random() - 0.5) * 1.6;
-                  aimPoint.y += (Math.random() - 0.5) * 1.2;
+              if (distToPlayer < 42 && playerRespawnTimer <= 0) {
+                _dir.copy(_toPlayer).divideScalar(distToPlayer);
+                _raycaster.set(_botEye, _dir);
+                _raycaster.far = distToPlayer;
+                const occ = _raycaster.intersectObjects(arena.obstacleMeshes, false);
+                if (occ.length === 0) seesPlayer = true;
+              }
+
+              let moveSpeedRatio = 0;
+              if (seesPlayer) {
+                bot.yaw = Math.atan2(_toPlayer.x, _toPlayer.z);
+                bot.strafeTimer -= dt;
+                if (bot.strafeTimer <= 0) {
+                  bot.strafeDir *= -1;
+                  bot.strafeTimer = 0.9 + Math.random() * 1.1;
                 }
-                spawnTracer(_botEye, aimPoint);
 
-                if (hitPlayer) {
-                  const rawDmg = 12 + Math.floor(Math.random() * 8);
-                  const absorbed = armor > 0 ? Math.floor(rawDmg * 0.45) : 0;
-                  armor = Math.max(0, armor - absorbed);
-                  hp = Math.max(0, hp - (rawDmg - absorbed));
-                  if (hp <= 0) {
-                    deaths += 1;
-                    if (enemyTeam === 'ct') ctScore += 1;
-                    else tScore += 1;
-                    pushKillFeed(bot.name, bot.team, 'Você', team, 'ak47', false);
-                    if (gameMode === 'deathmatch') {
-                      playerRespawnTimer = 2.5;
-                    } else {
-                      roundNumber += 1;
-                      if (ctScore >= 10 || tScore >= 10) {
-                        matchEnded = true;
-                        winnerTeam = enemyTeam;
+                const strafeSpeed = distToPlayer > 12 ? 2.4 : 1.8;
+                const sx = Math.cos(bot.yaw) * bot.strafeDir * strafeSpeed;
+                const sz = -Math.sin(bot.yaw) * bot.strafeDir * strafeSpeed;
+                const bx = resolveCircleAABB(bot.pos.x + sx * dt, bot.pos.z, 0, 0.42, arena.colliders);
+                bot.pos.x = bx.x;
+                const bz = resolveCircleAABB(bot.pos.x, bot.pos.z + sz * dt, 0, 0.42, arena.colliders);
+                bot.pos.z = bz.z;
+                moveSpeedRatio = 0.65;
+
+                if (bot.reactionTimer > 0) {
+                  bot.reactionTimer -= dt;
+                } else if (bot.fireCooldown <= 0) {
+                  bot.fireCooldown = 0.24 + Math.random() * 0.22;
+                  bot.recoilFlash = 1.0;
+
+                  const accuracy = Math.max(0.28, 0.68 - distToPlayer * 0.012);
+                  const hitPlayer = Math.random() < accuracy;
+                  const aimPoint = _playerEye.clone();
+                  if (!hitPlayer) {
+                    aimPoint.x += (Math.random() - 0.5) * 1.6;
+                    aimPoint.y += (Math.random() - 0.5) * 1.2;
+                  }
+                  spawnTracer(_botEye, aimPoint);
+
+                  if (hitPlayer) {
+                    const rawDmg = 12 + Math.floor(Math.random() * 8);
+                    const absorbed = armor > 0 ? Math.floor(rawDmg * 0.45) : 0;
+                    armor = Math.max(0, armor - absorbed);
+                    hp = Math.max(0, hp - (rawDmg - absorbed));
+                    if (hp <= 0) {
+                      deaths += 1;
+                      onStatRef.current({ deaths: 1 });
+                      if (enemyTeam === 'ct') ctScore += 1;
+                      else tScore += 1;
+                      pushKillFeed(bot.name, bot.team, 'Você', team, 'ak47', false);
+                      if (gameMode === 'deathmatch') {
+                        playerRespawnTimer = 2.5;
                       } else {
-                        roundTimeSec = 90;
-                        resetRoundEntities();
+                        roundNumber += 1;
+                        if (ctScore >= 10 || tScore >= 10) {
+                          matchEnded = true;
+                          winnerTeam = enemyTeam;
+                          onStatRef.current({ matches: 1 });
+                        } else {
+                          roundTimeSec = 90;
+                          resetRoundEntities();
+                        }
                       }
                     }
                   }
                 }
-              }
-            } else {
-              bot.reactionTimer = 0.42;
-              const dx = bot.waypoint.x - bot.pos.x;
-              const dz = bot.waypoint.z - bot.pos.z;
-              const d = Math.hypot(dx, dz);
-              if (d < 1.6) {
-                bot.waypoint.copy(
-                  arena.patrolPoints[Math.floor(Math.random() * arena.patrolPoints.length)]
-                );
               } else {
-                const moveSpd = 3.2;
-                bot.yaw = Math.atan2(dx, dz);
-                const nx = (dx / d) * moveSpd;
-                const nz = (dz / d) * moveSpd;
-                const prevX = bot.pos.x;
-                const prevZ = bot.pos.z;
-                const bx = resolveCircleAABB(bot.pos.x + nx * dt, bot.pos.z, 0, 0.42, arena.colliders);
-                bot.pos.x = bx.x;
-                const bz = resolveCircleAABB(bot.pos.x, bot.pos.z + nz * dt, 0, 0.42, arena.colliders);
-                bot.pos.z = bz.z;
-                if (Math.hypot(bot.pos.x - prevX, bot.pos.z - prevZ) < 0.01) {
+                bot.reactionTimer = 0.42;
+                const dx = bot.waypoint.x - bot.pos.x;
+                const dz = bot.waypoint.z - bot.pos.z;
+                const d = Math.hypot(dx, dz);
+                if (d < 1.6) {
                   bot.waypoint.copy(
                     arena.patrolPoints[Math.floor(Math.random() * arena.patrolPoints.length)]
                   );
+                } else {
+                  const moveSpd = 3.2;
+                  bot.yaw = Math.atan2(dx, dz);
+                  const nx = (dx / d) * moveSpd;
+                  const nz = (dz / d) * moveSpd;
+                  const prevX = bot.pos.x;
+                  const prevZ = bot.pos.z;
+                  const bx = resolveCircleAABB(bot.pos.x + nx * dt, bot.pos.z, 0, 0.42, arena.colliders);
+                  bot.pos.x = bx.x;
+                  const bz = resolveCircleAABB(bot.pos.x, bot.pos.z + nz * dt, 0, 0.42, arena.colliders);
+                  bot.pos.z = bz.z;
+                  if (Math.hypot(bot.pos.x - prevX, bot.pos.z - prevZ) < 0.01) {
+                    bot.waypoint.copy(
+                      arena.patrolPoints[Math.floor(Math.random() * arena.patrolPoints.length)]
+                    );
+                  }
+                  moveSpeedRatio = 1.0;
                 }
-                moveSpeedRatio = 1.0;
               }
-            }
 
-            bot.rig.root.position.set(bot.pos.x, 0, bot.pos.z);
-            bot.rig.root.rotation.y = bot.yaw;
-            bot.rig.updateCombatPose(
-              elapsed + i * 1.1,
-              moveSpeedRatio,
-              bot.recoilFlash,
-              false,
-              0,
-              bot.hitFlash
-            );
+              bot.rig.root.position.set(bot.pos.x, 0, bot.pos.z);
+              bot.rig.root.rotation.y = bot.yaw;
+              bot.rig.updateCombatPose(
+                elapsed + i * 1.1,
+                moveSpeedRatio,
+                bot.recoilFlash,
+                false,
+                0,
+                bot.hitFlash
+              );
+            }
           }
 
           // Update Tracers
@@ -1320,11 +1628,48 @@ export const GameViewport = React.forwardRef<GameViewportHandle, GameViewportPro
         const now = performance.now();
         if (now - lastHudPush > 66) {
           lastHudPush = now;
+          const scoreboard: ScoreboardEntry[] = [
+            {
+              id: selfShortId,
+              shortId: selfShortId,
+              name: selfName,
+              team,
+              kills,
+              deaths,
+              isBot: false,
+              isSelf: true,
+            },
+            ...(isOnlineMode
+              ? Array.from(remoteActors.values()).map((ra) => ({
+                  id: ra.id,
+                  shortId: ra.state.shortId,
+                  name: ra.state.name,
+                  team: ra.state.team,
+                  kills: ra.state.kills,
+                  deaths: ra.state.deaths,
+                  isBot: ra.state.isBot,
+                  isSelf: false,
+                }))
+              : bots.map((b) => ({
+                  id: b.id,
+                  shortId: b.id.toUpperCase(),
+                  name: b.name,
+                  team: b.team,
+                  kills: b.kills,
+                  deaths: b.deaths,
+                  isBot: true,
+                  isSelf: false,
+                }))),
+          ].sort((a, b) => b.kills - a.kills || a.deaths - b.deaths);
+
           onHudRef.current({
             hp,
             armor,
             money,
             fps: currentFps,
+            isOnline: isOnlineMode,
+            roomCode,
+            pingMs: multiplayerClient.getPingMs(),
             activeWeapon,
             slot1Weapon,
             ammo: {
@@ -1352,6 +1697,7 @@ export const GameViewport = React.forwardRef<GameViewportHandle, GameViewportPro
             matchEnded,
             winnerTeam,
             killFeed,
+            scoreboard,
             pointerLocked,
           });
         }
@@ -1366,6 +1712,10 @@ export const GameViewport = React.forwardRef<GameViewportHandle, GameViewportPro
         isDisposed = true;
         cancelAnimationFrame(frameId);
         clearTimeout(frameId);
+        unsubSnapshot?.();
+        unsubHit?.();
+        unsubKill?.();
+        unsubTracer?.();
         if (document.pointerLockElement === renderer.domElement) {
           document.exitPointerLock?.();
         }
@@ -1397,13 +1747,15 @@ export const GameViewport = React.forwardRef<GameViewportHandle, GameViewportPro
         shockRingGeo.dispose();
         viewmodelWeapon?.dispose();
         bots.forEach((b) => b.rig.dispose());
+        remoteActors.forEach((ra) => ra.rig.dispose());
+        remoteActors.clear();
         arena.dispose();
         textures.dispose();
         envTex.dispose();
         renderer.dispose();
         apiRef.current = null;
       };
-    }, [team, mapId, gameMode, initialPrimaryWeapon, skinId]);
+    }, [playMode, roomCode, selfShortId, team, mapId, gameMode, initialPrimaryWeapon, skinId]);
 
     if (webglError) {
       return (

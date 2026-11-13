@@ -4,6 +4,18 @@ export type MapId = 'mirage' | 'nuke';
 
 export type GameModeId = 'deathmatch' | 'tactical';
 
+export type PlayModeKind = 'offline' | 'online';
+
+export type AuthProviderKind = 'guest' | 'google' | 'apple';
+
+export type BannerId =
+  | 'mirage-gold'
+  | 'nuke-reactor'
+  | 'cyber-cobalt'
+  | 'crimson-ops'
+  | 'shadow-elite'
+  | 'emerald-spec';
+
 export type WeaponId = 'ak47' | 'm4a1s' | 'awp' | 'deagle' | 'knife';
 
 export type SkinId = 'default' | 'asiimov' | 'hyper' | 'gold' | 'carbon';
@@ -28,33 +40,47 @@ export type HudElementId =
   | 'inspect';
 
 export interface HudControlPlacement {
-  xPct: number; // 0..100 viewport width
-  yPct: number; // 0..100 viewport height
-  scale: number; // 0.7..1.45
+  xPct: number;
+  yPct: number;
+  scale: number;
 }
 
 export interface HudLayout {
-  opacity: number; // 0.4..1.0
+  opacity: number;
   controls: Record<HudElementId, HudControlPlacement>;
 }
 
 export interface GameSettings {
-  touchSensitivity: number; // 0.3..2.5
-  mouseSensitivity: number; // 0.3..2.5
-  adsSensitivityMult: number; // 0.25..1.5
+  touchSensitivity: number;
+  mouseSensitivity: number;
+  adsSensitivityMult: number;
   invertY: boolean;
   graphicsPreset: GraphicsPreset;
-  resolutionScale: number; // 0.65 | 0.85 | 1.0
+  resolutionScale: number;
   shadowsEnabled: boolean;
   particlesEnabled: boolean;
   showFps: boolean;
   crosshairColor: CrosshairColor;
-  crosshairSize: number; // 6..14
-  masterVolume: number; // 0..1
+  crosshairSize: number;
+  masterVolume: number;
   muted: boolean;
 }
 
+export interface BannerSpec {
+  id: BannerId;
+  name: string;
+  subtitle: string;
+  gradientFrom: string;
+  gradientTo: string;
+  accentHex: string;
+}
+
 export interface PlayerProfile {
+  uid: string;
+  shortId: string;
+  displayName: string;
+  bannerId: BannerId;
+  authProvider: AuthProviderKind;
   credits: number;
   unlockedSkins: SkinId[];
   unlockedHitFx: HitEffectId[];
@@ -63,6 +89,87 @@ export interface PlayerProfile {
   equippedHitFx: HitEffectId;
   equippedKillFx: KillEffectId;
   casesOpened: number;
+  kills: number;
+  deaths: number;
+  wins: number;
+  matchesPlayed: number;
+  score: number;
+}
+
+export interface PublicPlayerInfo {
+  uid: string;
+  shortId: string;
+  displayName: string;
+  bannerId: BannerId;
+  authProvider: AuthProviderKind;
+  kills: number;
+  deaths: number;
+  wins: number;
+  matchesPlayed: number;
+  score: number;
+  online?: boolean;
+  roomCode?: string | null;
+}
+
+export interface FriendRecord {
+  friendUid: string;
+  friendShortId: string;
+  friendName: string;
+  friendBannerId: BannerId;
+  online?: boolean;
+  roomCode?: string | null;
+}
+
+export interface OnlineRoomSummary {
+  code: string;
+  name: string;
+  mapId: MapId;
+  gameMode: GameModeId;
+  playerCount: number;
+  maxPlayers: number;
+  fillBots: boolean;
+  hostName: string;
+}
+
+export interface RoomInviteEvent {
+  inviteId: string;
+  fromShortId: string;
+  fromName: string;
+  fromBannerId: BannerId;
+  roomCode: string;
+  mapId: MapId;
+  gameMode: GameModeId;
+}
+
+export interface RemoteActorState {
+  id: string;
+  shortId: string;
+  name: string;
+  bannerId: BannerId;
+  team: TeamSide;
+  weaponId: WeaponId;
+  skinId: SkinId;
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+  hp: number;
+  isDead: boolean;
+  crouching: boolean;
+  kills: number;
+  deaths: number;
+  isBot: boolean;
+}
+
+export interface ScoreboardEntry {
+  id: string;
+  shortId: string;
+  name: string;
+  team: TeamSide;
+  kills: number;
+  deaths: number;
+  isBot: boolean;
+  isSelf: boolean;
 }
 
 export interface HitEffectSpec {
@@ -148,6 +255,9 @@ export interface MatchHudState {
   armor: number;
   money: number;
   fps: number;
+  isOnline: boolean;
+  roomCode: string | null;
+  pingMs: number;
   activeWeapon: WeaponId;
   slot1Weapon: WeaponId;
   ammo: Record<WeaponId, { mag: number; reserve: number }>;
@@ -166,8 +276,60 @@ export interface MatchHudState {
   matchEnded: boolean;
   winnerTeam: TeamSide | null;
   killFeed: KillFeedEntry[];
+  scoreboard: ScoreboardEntry[];
   pointerLocked: boolean;
 }
+
+export const PROFILE_BANNERS: BannerSpec[] = [
+  {
+    id: 'mirage-gold',
+    name: 'Vetor Mirage',
+    subtitle: 'Operação Deserto',
+    gradientFrom: '#78350f',
+    gradientTo: '#1c1917',
+    accentHex: '#f59e0b',
+  },
+  {
+    id: 'nuke-reactor',
+    name: 'Reator Nuke',
+    subtitle: 'Protocolo Industrial',
+    gradientFrom: '#0c4a6e',
+    gradientTo: '#0f172a',
+    accentHex: '#38bdf8',
+  },
+  {
+    id: 'cyber-cobalt',
+    name: 'Cobalto Elétrico',
+    subtitle: 'Força Tática CT',
+    gradientFrom: '#1e3a8a',
+    gradientTo: '#090d16',
+    accentHex: '#60a5fa',
+  },
+  {
+    id: 'crimson-ops',
+    name: 'Código Carmesim',
+    subtitle: 'Esquadrão de Assalto',
+    gradientFrom: '#7f1d1d',
+    gradientTo: '#140b0e',
+    accentHex: '#ef4444',
+  },
+  {
+    id: 'shadow-elite',
+    name: 'Obsidiana Print',
+    subtitle: 'Operações Noturnas',
+    gradientFrom: '#27272a',
+    gradientTo: '#09090b',
+    accentHex: '#e4e4e7',
+  },
+  {
+    id: 'emerald-spec',
+    name: 'Mira Esmeralda',
+    subtitle: 'Atirador de Elite',
+    gradientFrom: '#064e3b',
+    gradientTo: '#091210',
+    accentHex: '#34d399',
+  },
+];
 
 export const WEAPON_SPECS: Record<WeaponId, WeaponSpec> = {
   ak47: {
