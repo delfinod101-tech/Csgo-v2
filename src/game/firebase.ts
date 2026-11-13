@@ -23,6 +23,7 @@ import {
   query,
   serverTimestamp,
   setDoc,
+  updateDoc,
   where,
 } from 'firebase/firestore';
 import firebaseConfig from '@/firebase-applet-config.json';
@@ -219,75 +220,135 @@ export async function signOutFirebase(): Promise<void> {
   }
 }
 
+const VALID_BANNERS: readonly BannerId[] = [
+  'mirage-gold',
+  'nuke-reactor',
+  'cyber-cobalt',
+  'crimson-ops',
+  'shadow-elite',
+  'emerald-spec',
+];
+
 function sanitizeDisplayName(name: string, shortId: string): string {
   const cleaned = name.trim().replace(/\s+/g, ' ').slice(0, 16);
   return cleaned.length >= 2 ? cleaned : `Operador${shortId.slice(-4)}`;
 }
 
-export async function syncProfileToFirestore(profile: PlayerProfile): Promise<void> {
+function sanitizeBannerId(bannerId: BannerId): BannerId {
+  return VALID_BANNERS.includes(bannerId) ? bannerId : 'mirage-gold';
+}
+
+function sanitizeNonNegInt(val: number, max: number): number {
+  if (!Number.isFinite(val)) return 0;
+  return Math.max(0, Math.min(max, Math.floor(val)));
+}
+
+let syncChain: Promise<void> = Promise.resolve();
+
+export function syncProfileToFirestore(profile: PlayerProfile): Promise<void> {
+  const run = syncChain.then(() => performProfileSync(profile));
+  syncChain = run.catch(() => {});
+  return run;
+}
+
+async function performProfileSync(profile: PlayerProfile): Promise<void> {
   const user = auth.currentUser;
   if (!user) return;
   if (!/^STK-[0-9]{6}$/.test(profile.shortId)) return;
 
+  const activeUid = user.uid;
   const safeName = sanitizeDisplayName(profile.displayName, profile.shortId);
+  const safeBanner = sanitizeBannerId(profile.bannerId);
   const provider = detectProviderFromUser(user);
 
   const dirPath = `playerDirectory/${profile.shortId}`;
   try {
     const dirRef = doc(db, 'playerDirectory', profile.shortId);
-    const existingDir = await getDoc(dirRef);
-    if (existingDir.exists() && existingDir.data().uid !== user.uid) {
-      return;
+    let existingDir;
+    try {
+      existingDir = await getDocFromServer(dirRef);
+    } catch {
+      existingDir = await getDoc(dirRef);
     }
-    const createdAtValue = existingDir.exists()
-      ? existingDir.data().createdAt
-      : serverTimestamp();
 
-    await setDoc(dirRef, {
-      uid: user.uid,
-      shortId: profile.shortId,
+    if (auth.currentUser?.uid !== activeUid) return;
+
+    const dirPayloadMutable = {
       displayName: safeName,
-      bannerId: profile.bannerId,
+      bannerId: safeBanner,
       authProvider: provider,
-      kills: Math.max(0, Math.floor(profile.kills)),
-      deaths: Math.max(0, Math.floor(profile.deaths)),
-      wins: Math.max(0, Math.floor(profile.wins)),
-      matchesPlayed: Math.max(0, Math.floor(profile.matchesPlayed)),
-      score: Math.max(0, Math.floor(profile.score)),
-      createdAt: createdAtValue,
+      kills: sanitizeNonNegInt(profile.kills, 1000000),
+      deaths: sanitizeNonNegInt(profile.deaths, 1000000),
+      wins: sanitizeNonNegInt(profile.wins, 1000000),
+      matchesPlayed: sanitizeNonNegInt(profile.matchesPlayed, 1000000),
+      score: sanitizeNonNegInt(profile.score, 100000000),
       updatedAt: serverTimestamp(),
-    });
+    };
+
+    if (existingDir.exists()) {
+      const existingData = existingDir.data();
+      if (existingData.uid === activeUid) {
+        await updateDoc(dirRef, dirPayloadMutable);
+      }
+      // If another UID already owns this shortId on the server, skip writing to avoid permission collision.
+    } else {
+      await setDoc(dirRef, {
+        uid: activeUid,
+        shortId: profile.shortId,
+        ...dirPayloadMutable,
+        createdAt: serverTimestamp(),
+      });
+    }
   } catch (error) {
+    if (auth.currentUser?.uid !== activeUid) return;
     handleFirestoreError(error, OperationType.WRITE, dirPath);
   }
 
-  const accPath = `players/${user.uid}/private/account`;
+  if (auth.currentUser?.uid !== activeUid) return;
+
+  const accPath = `players/${activeUid}/private/account`;
   try {
-    const accRef = doc(db, 'players', user.uid, 'private', 'account');
-    const existingAcc = await getDoc(accRef);
-    const createdAtValue = existingAcc.exists()
-      ? existingAcc.data().createdAt
-      : serverTimestamp();
+    const accRef = doc(db, 'players', activeUid, 'private', 'account');
+    let existingAcc;
+    try {
+      existingAcc = await getDocFromServer(accRef);
+    } catch {
+      existingAcc = await getDoc(accRef);
+    }
 
-    const safeSkins = profile.unlockedSkins.length > 0 ? profile.unlockedSkins.slice(0, 32) : ['m4-tactical'];
-    const safeHitFx = profile.unlockedHitFx.length > 0 ? profile.unlockedHitFx.slice(0, 32) : ['spark'];
-    const safeKillFx = profile.unlockedKillFx.length > 0 ? profile.unlockedKillFx.slice(0, 32) : ['shockwave'];
+    if (auth.currentUser?.uid !== activeUid) return;
 
-    await setDoc(accRef, {
-      uid: user.uid,
-      shortId: profile.shortId,
-      credits: Math.max(0, Math.floor(profile.credits)),
-      equippedSkin: profile.equippedSkin,
-      equippedHitFx: profile.equippedHitFx,
-      equippedKillFx: profile.equippedKillFx,
+    const safeSkins =
+      profile.unlockedSkins.length > 0 ? profile.unlockedSkins.slice(0, 32) : ['default'];
+    const safeHitFx =
+      profile.unlockedHitFx.length > 0 ? profile.unlockedHitFx.slice(0, 32) : ['spark'];
+    const safeKillFx =
+      profile.unlockedKillFx.length > 0 ? profile.unlockedKillFx.slice(0, 32) : ['shockwave'];
+
+    const accMutable = {
+      credits: sanitizeNonNegInt(profile.credits, 10000000),
+      equippedSkin: (profile.equippedSkin || 'default').slice(0, 32),
+      equippedHitFx: (profile.equippedHitFx || 'spark').slice(0, 32),
+      equippedKillFx: (profile.equippedKillFx || 'shockwave').slice(0, 32),
       unlockedSkins: safeSkins,
       unlockedHitFx: safeHitFx,
       unlockedKillFx: safeKillFx,
-      casesOpened: Math.max(0, Math.floor(profile.casesOpened)),
-      createdAt: createdAtValue,
+      casesOpened: sanitizeNonNegInt(profile.casesOpened, 1000000),
       updatedAt: serverTimestamp(),
-    });
+    };
+
+    if (existingAcc.exists()) {
+      await updateDoc(accRef, accMutable);
+    } else {
+      await setDoc(accRef, {
+        uid: activeUid,
+        shortId: profile.shortId,
+        ...accMutable,
+        createdAt: serverTimestamp(),
+      });
+    }
   } catch (error) {
+    if (auth.currentUser?.uid !== activeUid) return;
     handleFirestoreError(error, OperationType.WRITE, accPath);
   }
 }

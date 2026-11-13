@@ -291,7 +291,13 @@ export const LobbyViewport = React.forwardRef<LobbyViewportHandle, LobbyViewport
         stateRef.current.skinId,
         textures.skinMaps
       );
-      showcaseWeapon.root.scale.setScalar(1.85);
+      showcaseWeapon.root.scale.setScalar(
+        stateRef.current.weaponId === 'knife'
+          ? 2.9
+          : stateRef.current.weaponId === 'deagle'
+            ? 2.6
+            : 1.85
+      );
       showcaseGroup.add(showcaseWeapon.root);
 
       // Drag-to-orbit rotation
@@ -332,7 +338,7 @@ export const LobbyViewport = React.forwardRef<LobbyViewportHandle, LobbyViewport
       let lastWeapon = stateRef.current.weaponId;
       let lastTeam = stateRef.current.team;
       let lastSkin = stateRef.current.skinId;
-      let lastMap = stateRef.current.mapId;
+      let lastMap: MapId | null = null;
 
       function syncProps() {
         const s = stateRef.current;
@@ -359,7 +365,9 @@ export const LobbyViewport = React.forwardRef<LobbyViewportHandle, LobbyViewport
             showcaseWeapon.dispose();
           }
           showcaseWeapon = buildWeaponModel(s.weaponId, s.skinId, textures.skinMaps);
-          showcaseWeapon.root.scale.setScalar(s.weaponId === 'knife' ? 2.6 : 1.85);
+          showcaseWeapon.root.scale.setScalar(
+            s.weaponId === 'knife' ? 2.9 : s.weaponId === 'deagle' ? 2.6 : 1.85
+          );
           showcaseGroup.add(showcaseWeapon.root);
           inspectTimer = 1.0;
         }
@@ -371,13 +379,15 @@ export const LobbyViewport = React.forwardRef<LobbyViewportHandle, LobbyViewport
         if (s.mapId !== lastMap) {
           lastMap = s.mapId;
           const isMirage = s.mapId === 'mirage';
-          floorMat.map = isMirage ? textures.sandGround : textures.concreteFloor;
+          floorMat.map = isMirage ? textures.miragePaver : textures.hangarFloor;
           floorMat.needsUpdate = true;
-          crateMat.map = isMirage ? textures.woodCrate : textures.steelContainer;
+          crateMat.map = textures.woodCrateWarm;
           crateMat.needsUpdate = true;
-          scene.background = new THREE.Color(isMirage ? '#181e27' : '#0f1620');
-          scene.fog = new THREE.FogExp2(isMirage ? '#181e27' : '#0f1620', 0.045);
-          keyLight.color.set(isMirage ? '#ffe4c4' : '#dbeafe');
+          wallMat.map = isMirage ? textures.mirageSandstone : textures.hangarWall;
+          wallMat.needsUpdate = true;
+          scene.background = new THREE.Color(isMirage ? '#1e242d' : '#1b2634');
+          scene.fog = new THREE.FogExp2(isMirage ? '#1e242d' : '#1b2634', 0.045);
+          keyLight.color.set(isMirage ? '#ffe4c4' : '#eef6ff');
         }
       }
 

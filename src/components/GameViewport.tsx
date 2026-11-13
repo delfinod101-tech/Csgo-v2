@@ -20,7 +20,7 @@ import {
   WeaponId,
 } from '@/src/types/game';
 import { buildCharacterRig, CharacterRig } from '@/src/game/character';
-import { AABBCollider, buildArenaMap } from '@/src/game/maps';
+import { AABBCollider, WalkableRamp, buildArenaMap } from '@/src/game/maps';
 import {
   CombatHitEvent,
   CombatKillEvent,
@@ -142,6 +142,38 @@ function detectSoftwareWebGL(): boolean {
   }
 }
 
+function getGroundHeight(
+  x: number,
+  z: number,
+  y: number,
+  colliders: AABBCollider[],
+  ramps: WalkableRamp[]
+): number {
+  let bestY = 0;
+  for (let i = 0; i < ramps.length; i++) {
+    const r = ramps[i];
+    if (x >= r.minX - 0.12 && x <= r.maxX + 0.12 && z >= r.minZ - 0.12 && z <= r.maxZ + 0.12) {
+      const span = r.axis === 'z' ? r.maxZ - r.minZ : r.maxX - r.minX;
+      const pos = r.axis === 'z' ? z - r.minZ : x - r.minX;
+      const rawT = span > 0.001 ? Math.max(0, Math.min(1, pos / span)) : 0;
+      const t = r.dir === 1 ? rawT : 1 - rawT;
+      const ry = r.startY + (r.endY - r.startY) * t;
+      if (ry <= y + 0.65 && ry > bestY) {
+        bestY = ry;
+      }
+    }
+  }
+  for (let i = 0; i < colliders.length; i++) {
+    const c = colliders[i];
+    if (x >= c.minX - 0.16 && x <= c.maxX + 0.16 && z >= c.minZ - 0.16 && z <= c.maxZ + 0.16) {
+      if (c.maxY <= y + 0.45 && c.maxY > bestY) {
+        bestY = c.maxY;
+      }
+    }
+  }
+  return bestY;
+}
+
 function resolveCircleAABB(
   x: number,
   z: number,
@@ -151,9 +183,11 @@ function resolveCircleAABB(
 ): { x: number; z: number } {
   let rx = x;
   let rz = z;
+  const playerHeight = 1.78;
   for (let i = 0; i < colliders.length; i++) {
     const c = colliders[i];
-    if (y >= c.maxY - 0.15) continue;
+    if (y + playerHeight <= c.minY + 0.06) continue;
+    if (y >= c.maxY - 0.42) continue;
     const closestX = Math.max(c.minX, Math.min(rx, c.maxX));
     const closestZ = Math.max(c.minZ, Math.min(rz, c.maxZ));
     const dx = rx - closestX;
@@ -275,7 +309,7 @@ export const GameViewport = React.forwardRef<GameViewportHandle, GameViewportPro
 
       renderer.outputColorSpace = THREE.SRGBColorSpace;
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      renderer.toneMappingExposure = 1.1;
+      renderer.toneMappingExposure = mapId === 'mirage' ? 1.14 : 1.1;
       renderer.autoClear = false;
       const baseDpr = isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2);
       renderer.setPixelRatio(baseDpr * settingsRef.current.resolutionScale);
@@ -316,27 +350,53 @@ export const GameViewport = React.forwardRef<GameViewportHandle, GameViewportPro
       scene.fog = new THREE.FogExp2(arena.fogColor, arena.fogDensity);
 
       const sunLight = new THREE.DirectionalLight(
-        mapId === 'mirage' ? '#fff0d4' : '#dbeafe',
-        mapId === 'mirage' ? 2.4 : 1.9
+        mapId === 'mirage' ? '#ffe8c2' : '#fff8eb',
+        mapId === 'mirage' ? 2.55 : 2.15
       );
-      sunLight.position.set(22, 34, 18);
+      sunLight.position.set(
+        mapId === 'mirage' ? 26 : 16,
+        mapId === 'mirage' ? 36 : 42,
+        mapId === 'mirage' ? 20 : 12
+      );
       sunLight.castShadow = !isSoftwareGl && settingsRef.current.shadowsEnabled;
       sunLight.shadow.mapSize.set(2048, 2048);
       sunLight.shadow.camera.near = 2;
-      sunLight.shadow.camera.far = 90;
-      sunLight.shadow.camera.left = -32;
-      sunLight.shadow.camera.right = 32;
-      sunLight.shadow.camera.top = 32;
-      sunLight.shadow.camera.bottom = -32;
-      sunLight.shadow.bias = -0.0006;
+      sunLight.shadow.camera.far = mapId === 'mirage' ? 105 : 100;
+      const shadowBound = mapId === 'mirage' ? 34 : 36;
+      sunLight.shadow.camera.left = -shadowBound;
+      sunLight.shadow.camera.right = shadowBound;
+      sunLight.shadow.camera.top = shadowBound;
+      sunLight.shadow.camera.bottom = -shadowBound;
+      sunLight.shadow.bias = mapId === 'mirage' ? -0.0004 : -0.0006;
+      sunLight.shadow.normalBias = 0.02;
+      sunLight.shadow.radius = 2.5;
       scene.add(sunLight);
       scene.add(
         new THREE.HemisphereLight(
-          mapId === 'mirage' ? '#b3d4f5' : '#64748b',
-          mapId === 'mirage' ? '#7c6244' : '#0f172a',
-          0.78
+          mapId === 'mirage' ? '#a8d4ff' : '#bfe0ff',
+          mapId === 'mirage' ? '#9a7b56' : '#4b5563',
+          mapId === 'mirage' ? 0.92 : 1.05
         )
       );
+      if (mapId === 'mirage') {
+        // Cool sky-bounce directional fill opposite the sun (no extra shadow pass)
+        const bounceFill = new THREE.DirectionalLight('#cce4ff', 0.52);
+        bounceFill.position.set(-22, 18, -18);
+        scene.add(bounceFill);
+
+        // Warm unshadowed lantern practicals under Palace Balcony & Bazaar Canopy
+        const palaceLantern = new THREE.PointLight('#ffb866', 3.2, 14, 1.6);
+        palaceLantern.position.set(-20.5, 2.8, -5.0);
+        scene.add(palaceLantern);
+
+        const bazaarLantern = new THREE.PointLight('#ffb866', 3.0, 13, 1.6);
+        bazaarLantern.position.set(-9.7, 2.9, 18.6);
+        scene.add(bazaarLantern);
+      } else {
+        const fillLight = new THREE.DirectionalLight('#dbeafe', 0.65);
+        fillLight.position.set(-20, 18, -16);
+        scene.add(fillLight);
+      }
 
       applyGraphicsRef.current = () => {
         const s = settingsRef.current;
@@ -348,6 +408,59 @@ export const GameViewport = React.forwardRef<GameViewportHandle, GameViewportPro
       const viewmodelPivot = new THREE.Group();
       weaponScene.add(viewmodelPivot);
       let viewmodelWeapon: WeaponModelHandle | null = null;
+
+      // First-person voxel tactical arms & hands (Right trigger hand + Left support hand)
+      const vmArmGeos: THREE.BufferGeometry[] = [];
+      const vmSkinMat = new THREE.MeshStandardMaterial({ color: '#c89b7b', roughness: 0.74, metalness: 0.02 });
+      const vmShirtMat = new THREE.MeshStandardMaterial({
+        color: team === 'ct' ? '#0c4da2' : '#9c3728',
+        roughness: 0.78,
+        metalness: 0.04,
+      });
+      const vmCuffMat = new THREE.MeshStandardMaterial({
+        color: team === 'ct' ? '#093d84' : '#7d2a1e',
+        roughness: 0.82,
+        metalness: 0.04,
+      });
+      const vmWatchMat = new THREE.MeshStandardMaterial({
+        color: team === 'ct' ? '#38bdf8' : '#f59e0b',
+        roughness: 0.45,
+        metalness: 0.35,
+      });
+      const vmArmMats = [vmSkinMat, vmShirtMat, vmCuffMat, vmWatchMat];
+
+      const makeVmBox = (
+        parent: THREE.Object3D,
+        w: number,
+        h: number,
+        d: number,
+        x: number,
+        y: number,
+        z: number,
+        mat: THREE.Material
+      ) => {
+        const g = new THREE.BoxGeometry(w, h, d);
+        vmArmGeos.push(g);
+        const m = new THREE.Mesh(g, mat);
+        m.position.set(x, y, z);
+        parent.add(m);
+        return m;
+      };
+
+      const vmRightArm = new THREE.Group();
+      makeVmBox(vmRightArm, 0.058, 0.068, 0.088, 0, 0, 0.015, vmSkinMat); // Hand & fingers wrapping grip
+      makeVmBox(vmRightArm, 0.068, 0.068, 0.24, 0.008, -0.012, 0.16, vmSkinMat); // Forearm
+      makeVmBox(vmRightArm, 0.082, 0.082, 0.14, 0.012, -0.016, 0.33, vmShirtMat); // Short sleeve
+      makeVmBox(vmRightArm, 0.086, 0.086, 0.022, 0.012, -0.016, 0.265, vmCuffMat); // Cuff
+      viewmodelPivot.add(vmRightArm);
+
+      const vmLeftArm = new THREE.Group();
+      makeVmBox(vmLeftArm, 0.058, 0.066, 0.088, 0, 0, 0, vmSkinMat); // Support hand
+      makeVmBox(vmLeftArm, 0.068, 0.068, 0.24, -0.008, -0.012, 0.15, vmSkinMat); // Forearm
+      makeVmBox(vmLeftArm, 0.073, 0.073, 0.024, -0.006, -0.008, 0.09, vmWatchMat); // Team wristband
+      makeVmBox(vmLeftArm, 0.082, 0.082, 0.14, -0.012, -0.016, 0.32, vmShirtMat); // Short sleeve
+      makeVmBox(vmLeftArm, 0.086, 0.086, 0.022, -0.012, -0.016, 0.255, vmCuffMat); // Cuff
+      viewmodelPivot.add(vmLeftArm);
 
       const enemyTeam: TeamSide = team === 'ct' ? 't' : 'ct';
       const playerSpawns = team === 'ct' ? arena.ctSpawns : arena.tSpawns;
@@ -1299,10 +1412,19 @@ export const GameViewport = React.forwardRef<GameViewportHandle, GameViewportPro
 
             playerVelY -= 18.5 * dt;
             playerPos.y += playerVelY * dt;
-            if (playerPos.y <= 0) {
-              playerPos.y = 0;
+            const groundY = getGroundHeight(
+              playerPos.x,
+              playerPos.z,
+              playerPos.y,
+              arena.colliders,
+              arena.ramps
+            );
+            if (playerPos.y <= groundY) {
+              playerPos.y = groundY;
               playerVelY = 0;
               isGrounded = true;
+            } else {
+              isGrounded = false;
             }
           }
 
@@ -1360,25 +1482,68 @@ export const GameViewport = React.forwardRef<GameViewportHandle, GameViewportPro
               : 0;
             const inspectWave = inspectAnim > 0 ? Math.sin(inspectAnim * Math.PI) : 0;
 
-            const baseX = THREE.MathUtils.lerp(0.24, 0.0, adsProgress);
-            const baseY = THREE.MathUtils.lerp(-0.22, -0.14, adsProgress);
-            const baseZ = THREE.MathUtils.lerp(-0.45, -0.36, adsProgress);
+            if (activeWeapon === 'knife') {
+              const slashWave = Math.sin(Math.min(boltSlide, 1) * Math.PI);
+              const spinAngle = inspectAnim > 0 ? inspectAnim * Math.PI * 2 : 0;
+              viewmodelPivot.position.set(
+                0.20 + bobX * 0.8 - slashWave * 0.22 - inspectWave * 0.06,
+                -0.165 - bobY * 0.8 - equipAnim * 0.22 + slashWave * 0.05,
+                -0.34 - slashWave * 0.10 - inspectWave * 0.03
+              );
+              viewmodelPivot.rotation.set(
+                0.18 - equipAnim * 0.65 + slashWave * 0.45 + spinAngle,
+                0.44 + slashWave * 1.05 + inspectWave * 0.45,
+                -0.62 - slashWave * 0.72 + inspectWave * 0.28
+              );
+              viewmodelWeapon.muzzleFlash.visible = false;
+              // Right hand holds Karambit handle; left hand sits at balanced off-hand guard
+              vmRightArm.position.set(0.012, -0.018, 0.036);
+              vmRightArm.rotation.set(-0.18, -0.32, 0.18);
+              vmLeftArm.position.set(-0.27 - slashWave * 0.04, -0.22 + slashWave * 0.06, -0.15 - slashWave * 0.08);
+              vmLeftArm.rotation.set(-0.12, 0.56, -0.22);
+            } else {
+              const baseX = THREE.MathUtils.lerp(0.24, 0.0, adsProgress);
+              const baseY = THREE.MathUtils.lerp(-0.22, -0.14, adsProgress);
+              const baseZ = THREE.MathUtils.lerp(-0.45, -0.36, adsProgress);
 
-            viewmodelPivot.position.set(
-              baseX + bobX - inspectWave * 0.08,
-              baseY - bobY - equipAnim * 0.24 - reloadArc * 0.14,
-              baseZ + recoilKick * 0.48
-            );
-            viewmodelPivot.rotation.set(
-              recoilPitch - equipAnim * 0.55 + inspectWave * 0.28,
-              inspectWave * 0.72,
-              reloadArc * 0.42 + inspectWave * 0.45
-            );
+              viewmodelPivot.position.set(
+                baseX + bobX - inspectWave * 0.08,
+                baseY - bobY - equipAnim * 0.24 - reloadArc * 0.14,
+                baseZ + recoilKick * 0.48
+              );
+              viewmodelPivot.rotation.set(
+                recoilPitch - equipAnim * 0.55 + inspectWave * 0.28,
+                inspectWave * 0.72,
+                reloadArc * 0.42 + inspectWave * 0.45
+              );
 
-            viewmodelWeapon.magazineGroup.position.y = -reloadArc * 0.22;
-            viewmodelWeapon.boltGroup.position.z = -boltSlide * 0.055;
-            viewmodelWeapon.muzzleFlash.visible = muzzleFlashTimer > 0;
-            viewmodelWeapon.muzzleFlash.rotation.z = elapsed * 45;
+              viewmodelWeapon.magazineGroup.position.y = -reloadArc * 0.22;
+              viewmodelWeapon.boltGroup.position.z = -boltSlide * 0.055;
+              viewmodelWeapon.muzzleFlash.visible = muzzleFlashTimer > 0;
+              viewmodelWeapon.muzzleFlash.rotation.z = elapsed * 45;
+
+              if (activeWeapon === 'deagle') {
+                vmRightArm.position.set(0.008, -0.068, 0.052);
+                vmRightArm.rotation.set(-0.18, -0.26, 0.08);
+                vmLeftArm.position.set(
+                  -0.026,
+                  -0.080 - reloadArc * 0.16,
+                  0.048 + reloadArc * 0.06
+                );
+                vmLeftArm.rotation.set(-0.18, 0.42, -0.14);
+              } else {
+                const handguardZ = activeWeapon === 'awp' ? -0.23 : -0.245;
+                const gripZ = activeWeapon === 'awp' ? 0.115 : 0.098;
+                vmRightArm.position.set(0.010, -0.068, gripZ);
+                vmRightArm.rotation.set(-0.20, -0.24, 0.10);
+                vmLeftArm.position.set(
+                  -0.024,
+                  -0.042 - reloadArc * 0.19,
+                  handguardZ + reloadArc * 0.17
+                );
+                vmLeftArm.rotation.set(-0.16 + reloadArc * 0.25, 0.54, -0.18);
+              }
+            }
           }
 
           // Send local state at 20Hz when online & interpolate remote actors at 60fps
@@ -1746,6 +1911,8 @@ export const GameViewport = React.forwardRef<GameViewportHandle, GameViewportPro
         pillarGeo.dispose();
         shockRingGeo.dispose();
         viewmodelWeapon?.dispose();
+        vmArmGeos.forEach((g) => g.dispose());
+        vmArmMats.forEach((m) => m.dispose());
         bots.forEach((b) => b.rig.dispose());
         remoteActors.forEach((ra) => ra.rig.dispose());
         remoteActors.clear();
