@@ -1,0 +1,6 @@
+{
+  "name": "Carro",
+  "description": "Interactive 3D automotive design studio, configurator, and proving-ground test drive.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
