@@ -855,9 +855,13 @@ export function buildArenaMap(mapId: MapId, textures: GameTextures): BuiltMap {
     addBatchedBox(1.55, 1.55, 1.55, -13.5, 0.775, 11.4, crateMat);
 
     // West Mid Alley Archway + "<- A" Dripping Spray Stencil
-    addBatchedBox(12.8, 1.9, 1.6, -16.9, 4.95, -14.5, wallMat, true);
-    addBatchedBox(12.8, 0.24, 1.85, -16.9, 6.0, -14.5, accentTrimMat, false);
-    addDecalPlane(3.0, 1.6, -10.2, 2.2, -14.5, 0, Math.PI / 2, sprayLeftAMat);
+    // Lintel stops at the Palace balcony edge (x = -18.8) so it no longer blocks the
+    // balcony walkway, and rests on two real pillars instead of floating mid-air.
+    addBatchedBox(8.55, 1.9, 1.6, -14.525, 4.95, -14.5, wallMat, true);
+    addBatchedBox(8.55, 0.24, 1.85, -14.525, 6.0, -14.5, accentTrimMat, false);
+    addBatchedBox(0.8, 4.0, 1.6, -18.4, 2.0, -14.5, wallMat, true);
+    addBatchedBox(1.5, 4.0, 1.6, -11.0, 2.0, -14.5, wallMat, true);
+    addDecalPlane(3.0, 1.6, -10.22, 2.2, -14.5, 0, Math.PI / 2, sprayLeftAMat);
 
     // -------------------------------------------------------------------------
     // 5. EAST STONE STAIRS + TERRACE + CARPET + CONNECTOR ARCH ("B")
@@ -930,7 +934,7 @@ export function buildArenaMap(mapId: MapId, textures: GameTextures): BuiltMap {
     );
 
     // LatheGeometry Terracotta Clay Amphoras / Urns tucked along safe wall corners
-    addTerracottaUrn(-9.1, 0, 12.6, 1.05);
+    addTerracottaUrn(-8.95, 0, 12.4, 1.05);
     addTerracottaUrn(-18.2, 0, -17.2, 0.95);
     addTerracottaUrn(11.65, 0, 5.2, 1.0);
     addTerracottaUrn(18.2, 0, -2.5, 0.95);
@@ -939,7 +943,7 @@ export function buildArenaMap(mapId: MapId, textures: GameTextures): BuiltMap {
     // -------------------------------------------------------------------------
     // 7. LUSH TWO-TONE PALM TREES AROUND COURTYARDS & PERIMETER
     // -------------------------------------------------------------------------
-    addPalmTree(-10.8, 6.2, 6.4, 0.1);
+    addPalmTree(-12.8, 4.4, 6.4, 0.1);
     addPalmTree(7.5, -23.5, 7.0, -0.08);
     addPalmTree(16.5, 20.5, 6.5, -0.1);
     addPalmTree(-17.0, -23.0, 6.8, 0.09);
@@ -1314,9 +1318,9 @@ export function buildArenaMap(mapId: MapId, textures: GameTextures): BuiltMap {
 
     // Red "A" Square Sign above A Garage Doorway + "<- A" Stencil + Red Fire Cabinet
     addBoxObstacle(0.14, 2.3, 2.3, -23.22, 6.55, -3.0, signAMat, false);
-    addDecalPlane(2.8, 1.4, -23.32, 2.4, 3.6, 0, Math.PI / 2, stencilLeftAMat);
+    addDecalPlane(2.8, 1.4, -23.32, 2.4, 4.0, 0, Math.PI / 2, stencilLeftAMat);
     // Red fire-hose cabinet inside wall next to South Yard Door
-    addBoxObstacle(0.32, 1.25, 0.85, -23.18, 1.55, 13.5, redAccentMat, false);
+    addBoxObstacle(0.32, 1.25, 0.85, -23.18, 1.55, 12.2, redAccentMat, false);
 
     // -------------------------------------------------------------------------
     // 3. EAST WALL (X = +24) WITH B DOORWAY & UNDERPASS CONNECTOR
@@ -1333,7 +1337,7 @@ export function buildArenaMap(mapId: MapId, textures: GameTextures): BuiltMap {
 
     // Header above B Doorway (Z: +8 .. +14, y = 3.0..11.4)
     addBoxObstacle(1.3, 8.4, 6.0, 24, 7.2, 11.0, wallMat);
-    addBoxObstacle(1.5, 0.45, 6.2, 24, 3.15, 11.0, darkSteelMat);
+    addBoxObstacle(1.3, 0.45, 6.2, 24, 3.45, 11.0, darkSteelMat);
 
     // Red "B" Square Sign above B Doorway + "B ->" Stencil near Ramp
     addBoxObstacle(0.14, 2.2, 2.2, 23.22, 5.2, 11.0, signBMat, false);
@@ -1342,8 +1346,12 @@ export function buildArenaMap(mapId: MapId, textures: GameTextures): BuiltMap {
     // -------------------------------------------------------------------------
     // 4. HANGAR STRUCTURAL COLUMNS, ROOF DECK, SKYLIGHTS & BRIDGE CRANE
     // -------------------------------------------------------------------------
-    for (const pz of [-24, -12, 0, 12, 24]) {
+    // Columns are offset so none stands inside Doorway A (z -7..1), on the catwalk
+    // ramp (z 5..13), inside the B doorway (z 8..14) or on the B bridge deck.
+    for (const pz of [-24, -12, 2.0, 14.2, 24]) {
       addBoxObstacle(1.05, 11.2, 1.05, -23.35, 5.6, pz, darkSteelMat);
+    }
+    for (const pz of [-24, -12, 0, 6.9, 24]) {
       addBoxObstacle(1.05, 11.2, 1.05, 23.35, 5.6, pz, darkSteelMat);
     }
     for (const px of [-16, 0, 16]) {
@@ -1373,11 +1381,11 @@ export function buildArenaMap(mapId: MapId, textures: GameTextures): BuiltMap {
     }
 
     // Iconic Bright Yellow Overhead Bridge Crane (spanning East-West above Silos)
-    addBoxObstacle(46.2, 0.95, 0.72, 0, 8.95, -2.4, craneYellowMat, false, false);
-    addBoxObstacle(46.2, 0.95, 0.72, 0, 8.95, -0.6, craneYellowMat, false, false);
-    // Crane end trucks riding on wall rails
-    addBoxObstacle(1.2, 1.25, 3.4, -22.5, 8.8, -1.5, darkSteelMat, false, false);
-    addBoxObstacle(1.2, 1.25, 3.4, 22.5, 8.8, -1.5, darkSteelMat, false, false);
+    addBoxObstacle(44.4, 0.95, 0.72, 0, 8.95, -2.4, craneYellowMat, false, false);
+    addBoxObstacle(44.4, 0.95, 0.72, 0, 8.95, -0.6, craneYellowMat, false, false);
+    // Crane end trucks riding on wall rails (kept clear of the steel columns)
+    addBoxObstacle(1.2, 1.25, 3.4, -22.1, 8.8, -1.5, darkSteelMat, false, false);
+    addBoxObstacle(1.2, 1.25, 3.4, 22.1, 8.8, -1.5, darkSteelMat, false, false);
     // Central hoist trolley + dangling steel cable + hook above Twin Silos
     addBoxObstacle(2.2, 1.15, 2.3, 0.6, 9.0, -1.5, craneYellowMat, false, false);
     addBoxObstacle(0.08, 2.4, 0.08, 0.6, 7.3, -1.5, darkSteelMat, false, false);
